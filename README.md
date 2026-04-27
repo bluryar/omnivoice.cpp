@@ -16,7 +16,8 @@ Verified locally:
 - CUDA text-to-speech with OmniVoice GGUF models.
 - CUDA reference-audio voice cloning with WAV input and explicit `--ref-text`.
 - CPU fallback smoke tests.
-- Long Chinese text synthesis with chunked Higgs decode.
+- Long Chinese text synthesis with UTF-8-aware chunking and chunked Higgs
+  decode.
 
 Not yet claimed:
 
@@ -61,8 +62,9 @@ git submodule update --init --recursive
 Apply the OmniVoice CUDA fixes to the upstream ggml submodule:
 
 ```bash
-git -C vendor/ggml apply --check ../../patches/ggml-v0.9.11-omnivoice-cuda-fixes.patch
-git -C vendor/ggml apply ../../patches/ggml-v0.9.11-omnivoice-cuda-fixes.patch
+patch_file="$PWD/patches/ggml-v0.9.11-omnivoice-cuda-fixes.patch"
+git -C vendor/ggml apply --check "$patch_file"
+git -C vendor/ggml apply "$patch_file"
 ```
 
 The patch is required for the verified long-text CUDA Higgs decode path on
@@ -165,6 +167,10 @@ Reference audio is WAV-only in this version. `--ref-text` is required.
 are used for a fixed target audio span. To force a longer or shorter result,
 use `--duration`.
 
+Long text is split by punctuation when the estimated target length exceeds the
+chunk threshold. Chunk planning is UTF-8 aware, so Chinese text is counted by
+characters rather than bytes.
+
 ## Latency Output
 
 Each run prints major stages such as model loading, reference audio encoding,
@@ -182,6 +188,21 @@ At the end of synthesis, the CLI prints:
 
 `total`, `llm`, and `decode` use generated output audio duration as the RTF
 denominator. `reference_encode` uses the preprocessed reference audio duration.
+
+On a local RTX 4060 Ti run with a long Chinese prompt, WAV reference audio, and
+`omnivoice-q8_0.gguf`, the current CUDA path produced about 77 seconds of audio
+in about 15 seconds of generation time:
+
+```text
+[rtf] output_audio_s=77.140
+[rtf] total=0.194  seconds=14.932
+[rtf] llm=0.154  seconds=11.889
+[rtf] reference_encode=0.043  seconds=0.355  ref_audio_s=8.160
+[rtf] decode=0.035  seconds=2.664
+```
+
+For that case, LLM decode is the main latency source. Reference encoding and
+Higgs decode are comparatively small.
 
 ## Models
 

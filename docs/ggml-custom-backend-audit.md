@@ -2,9 +2,9 @@
 
 ## Baseline
 
-- Current workbench GGML: root `vendor/ggml`, commit `49f84a924f6ea4fc2ef73dbbd8cc4d734b54bd6d`, tag `v0.9.11`.
-- Standalone project GGML: `projects/omnivoice-ggml-cpp/vendor/ggml`, same upstream commit/tag, cloned from `https://github.com/ggml-org/ggml.git`.
-- Comparison target: root `vendor/ggml` working tree and standalone project `vendor/ggml` against upstream `v0.9.11`.
+- Standalone project GGML: `vendor/ggml`, commit `49f84a924f6ea4fc2ef73dbbd8cc4d734b54bd6d`, tag `v0.9.11`, cloned from `https://github.com/ggml-org/ggml.git`.
+- Workbench comparison source: the original `ggbond` root `vendor/ggml` tree contained the CUDA backend experiments/fixes summarized below.
+- Comparison target: standalone project `vendor/ggml` against upstream `v0.9.11`.
 - Standalone project policy: keep `vendor/ggml` as a clean upstream submodule
   and carry only the required OmniVoice CUDA fixes in
   `patches/ggml-v0.9.11-omnivoice-cuda-fixes.patch`.
@@ -22,9 +22,11 @@ project does not commit these customizations directly into `vendor/ggml`; its
 patch file contains only the `IM2COL` launch layout change and the
 `CONV_TRANSPOSE_1D` batch/index fix required by the verified CUDA decode path.
 
-## Modified Files
+## Historical Workbench Modified Files
 
-Root `vendor/ggml` differs from upstream in these files:
+The historical GGML workbench tree differed from upstream in these files. These
+experimental changes are not committed into this standalone project's
+`vendor/ggml` submodule.
 
 - `src/ggml-cuda/ggml-cuda.cu`
 - `src/ggml-cuda/softmax.cu`
@@ -32,8 +34,8 @@ Root `vendor/ggml` differs from upstream in these files:
 - `src/ggml-cuda/im2col.cu`
 - `src/ggml-cuda/conv-transpose-1d.cu`
 
-Standalone `projects/omnivoice-ggml-cpp/vendor/ggml` is kept clean against
-upstream. `patches/ggml-v0.9.11-omnivoice-cuda-fixes.patch` modifies:
+Standalone `vendor/ggml` is kept clean against upstream.
+`patches/ggml-v0.9.11-omnivoice-cuda-fixes.patch` modifies:
 
 - `src/ggml-cuda/im2col.cu`
 - `src/ggml-cuda/conv-transpose-1d.cu`
@@ -161,19 +163,16 @@ to a project-owned GGML fork.
 
 ## Reproduction Commands
 
+Run these commands from the standalone repository root after initializing the
+submodule.
+
 ```bash
 git -C vendor/ggml rev-parse HEAD
-git -C projects/omnivoice-ggml-cpp/vendor/ggml rev-parse HEAD
 git -C vendor/ggml diff --stat
-git -C vendor/ggml diff --name-only
-git -C projects/omnivoice-ggml-cpp/vendor/ggml diff --stat
-git -C projects/omnivoice-ggml-cpp/vendor/ggml apply --check ../../patches/ggml-v0.9.11-omnivoice-cuda-fixes.patch
 
-rg --no-filename -o "GGML_OP_[A-Z0-9_]+" vendor/ggml/include/ggml.h vendor/ggml/src/ggml.c | sort -u > /tmp/ggml-current-ops.txt
-rg --no-filename -o "GGML_OP_[A-Z0-9_]+" projects/omnivoice-ggml-cpp/vendor/ggml/include/ggml.h projects/omnivoice-ggml-cpp/vendor/ggml/src/ggml.c | sort -u > /tmp/ggml-upstream-ops.txt
-comm -13 /tmp/ggml-upstream-ops.txt /tmp/ggml-current-ops.txt
+patch_file="$PWD/patches/ggml-v0.9.11-omnivoice-cuda-fixes.patch"
+git -C vendor/ggml apply --check "$patch_file"
 
-rg --no-filename -o "GGML_API[^;{]+ggml_[A-Za-z0-9_]+" vendor/ggml/include | sed 's/[[:space:]]\+/ /g' | sort -u > /tmp/ggml-current-api.txt
-rg --no-filename -o "GGML_API[^;{]+ggml_[A-Za-z0-9_]+" projects/omnivoice-ggml-cpp/vendor/ggml/include | sed 's/[[:space:]]\+/ /g' | sort -u > /tmp/ggml-upstream-api.txt
-comm -13 /tmp/ggml-upstream-api.txt /tmp/ggml-current-api.txt
+rg --no-filename -o "GGML_OP_[A-Z0-9_]+" vendor/ggml/include/ggml.h vendor/ggml/src/ggml.c | sort -u
+rg --no-filename -o "GGML_API[^;{]+ggml_[A-Za-z0-9_]+" vendor/ggml/include | sed 's/[[:space:]]\+/ /g' | sort -u
 ```
