@@ -1,9 +1,10 @@
 #include "omnivoice_internal.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cstdint>
 #include <cmath>
 #include <numeric>
-#include <set>
 
 namespace omnivoice {
 namespace {
@@ -44,6 +45,83 @@ std::vector<float> trim_edges(const std::vector<float> & audio, int sample_rate,
     const int start = std::max(0, segs.front().first - lead);
     const int end = std::min<int>(audio.size(), segs.back().second + trail);
     return std::vector<float>(audio.begin() + start, audio.begin() + end);
+}
+
+uint32_t utf8_decode_one_local(const std::string & s, size_t * pos) {
+    const unsigned char c = static_cast<unsigned char>(s[*pos]);
+    if (c < 0x80) {
+        *pos += 1;
+        return c;
+    }
+    if ((c >> 5) == 0x6 && *pos + 1 < s.size()) {
+        uint32_t cp = ((c & 0x1f) << 6) | (static_cast<unsigned char>(s[*pos + 1]) & 0x3f);
+        *pos += 2;
+        return cp;
+    }
+    if ((c >> 4) == 0xe && *pos + 2 < s.size()) {
+        uint32_t cp = ((c & 0x0f) << 12)
+            | ((static_cast<unsigned char>(s[*pos + 1]) & 0x3f) << 6)
+            | (static_cast<unsigned char>(s[*pos + 2]) & 0x3f);
+        *pos += 3;
+        return cp;
+    }
+    if ((c >> 3) == 0x1e && *pos + 3 < s.size()) {
+        uint32_t cp = ((c & 0x07) << 18)
+            | ((static_cast<unsigned char>(s[*pos + 1]) & 0x3f) << 12)
+            | ((static_cast<unsigned char>(s[*pos + 2]) & 0x3f) << 6)
+            | (static_cast<unsigned char>(s[*pos + 3]) & 0x3f);
+        *pos += 4;
+        return cp;
+    }
+    *pos += 1;
+    return 0xfffd;
+}
+
+bool is_sentence_punctuation(uint32_t cp) {
+    switch (cp) {
+        case '.':
+        case ',':
+        case ';':
+        case ':':
+        case '!':
+        case '?':
+        case 0x3002:
+        case 0xff0c:
+        case 0xff1b:
+        case 0xff1a:
+        case 0xff01:
+        case 0xff1f:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool is_terminal_punctuation(uint32_t cp) {
+    if (is_sentence_punctuation(cp)) return true;
+    switch (cp) {
+        case ')':
+        case ']':
+        case '}':
+        case '"':
+        case '\'':
+        case 0x201d:
+        case 0x2019:
+        case 0x300d:
+        case 0x300f:
+        case 0x3011:
+        case 0xff09:
+            return true;
+        default:
+            return false;
+    }
+}
+
+uint32_t last_codepoint(const std::string & text) {
+    uint32_t last = 0;
+    size_t pos = 0;
+    while (pos < text.size()) last = utf8_decode_one_local(text, &pos);
+    return last;
 }
 
 } // namespace
@@ -134,20 +212,21 @@ std::string add_punctuation(const std::string & text) {
     std::string out = text;
     while (!out.empty() && std::isspace(static_cast<unsigned char>(out.back()))) out.pop_back();
     if (out.empty()) return out;
-    static const std::set<char> end = {';', ':', ',', '.', '!', '?', ')', ']', '}', '"', '\''};
-    if (end.find(out.back()) == end.end()) {
+    if (!is_terminal_punctuation(last_codepoint(out))) {
         out += contains_cjk(out) ? "。" : ".";
     }
     return out;
 }
 
 std::vector<std::string> chunk_text_punctuation(const std::string & text, int chunk_len, int min_chunk_len) {
-    static const std::string punct = ".,;:!?。，；：！？";
     std::vector<std::string> sentences;
     std::string cur;
-    for (size_t i = 0; i < text.size(); ++i) {
-        cur.push_back(text[i]);
-        if (punct.find(text[i]) != std::string::npos) {
+    size_t pos = 0;
+    while (pos < text.size()) {
+        const size_t start = pos;
+        const uint32_t cp = utf8_decode_one_local(text, &pos);
+        cur.append(text, start, pos - start);
+        if (is_sentence_punctuation(cp)) {
             sentences.push_back(cur);
             cur.clear();
         }
@@ -157,14 +236,14 @@ std::vector<std::string> chunk_text_punctuation(const std::string & text, int ch
     std::vector<std::string> chunks;
     cur.clear();
     for (const std::string & s : sentences) {
-        if (!cur.empty() && int(cur.size() + s.size()) > chunk_len) {
+        if (!cur.empty() && utf8_length(cur) + utf8_length(s) > chunk_len) {
             chunks.push_back(cur);
             cur.clear();
         }
         cur += s;
     }
     if (!cur.empty()) chunks.push_back(cur);
-    if (chunks.size() >= 2 && int(chunks[0].size()) < min_chunk_len) {
+    if (chunks.size() >= 2 && utf8_length(chunks[0]) < min_chunk_len) {
         chunks[1] = chunks[0] + chunks[1];
         chunks.erase(chunks.begin());
     }
@@ -173,4 +252,3 @@ std::vector<std::string> chunk_text_punctuation(const std::string & text, int ch
 }
 
 } // namespace omnivoice
-

@@ -43,6 +43,7 @@ struct VoiceClonePrompt {
     Tensor2i ref_audio_tokens;
     std::string ref_text;
     std::optional<float> ref_rms;
+    double ref_audio_seconds = 0.0;
 };
 
 struct Qwen3Spec {

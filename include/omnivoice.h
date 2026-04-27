@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -40,10 +41,31 @@ struct Audio {
     std::vector<float> samples;
 };
 
+enum class TraceEventKind {
+    StageBegin,
+    StageEnd,
+    LlmProgress,
+};
+
+struct TraceEvent {
+    TraceEventKind kind = TraceEventKind::StageBegin;
+    std::string phase;
+    std::string name;
+    double seconds = 0.0;
+    double audio_seconds = 0.0;
+    int chunk_index = 0;
+    int chunk_count = 0;
+    int current = 0;
+    int total = 0;
+    int updated = 0;
+    int total_positions = 0;
+};
+
 struct RuntimeOptions {
     std::string backend = "cpu";
     int device = 0;
     int threads = 4;
+    std::function<void(const TraceEvent &)> trace;
 };
 
 class OmniVoiceRuntime {
@@ -66,4 +88,3 @@ std::vector<float> read_wav_mono(const std::string & path, int target_sample_rat
 void write_wav_mono_f32(const std::string & path, const std::vector<float> & samples, int sample_rate);
 
 } // namespace omnivoice
-

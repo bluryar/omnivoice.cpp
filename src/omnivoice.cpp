@@ -7,6 +7,7 @@
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -94,9 +95,10 @@ struct Model {
     OmniVoiceSpec spec;
     HiggsSpec higgs;
     Tokenizer tokenizer;
+    std::function<void(const TraceEvent &)> trace;
 
     Model(const std::string & path, const RuntimeOptions & options)
-        : backend(options), tokenizer(load_tokens(path), load_merges(path)) {
+        : backend(options), tokenizer(load_tokens(path), load_merges(path)), trace(options.trace) {
         load(path);
     }
 
@@ -327,6 +329,82 @@ int HiggsSpec::semantic_feature_extractor_output_length(int input_length) const 
 }
 
 namespace {
+
+using Clock = std::chrono::steady_clock;
+
+void emit_trace(
+        const Model & model,
+        TraceEventKind kind,
+        const std::string & phase,
+        const std::string & name,
+        double seconds = 0.0,
+        double audio_seconds = 0.0,
+        int chunk_index = 0,
+        int chunk_count = 0,
+        int current = 0,
+        int total = 0,
+        int updated = 0,
+        int total_positions = 0) {
+    if (!model.trace) return;
+    TraceEvent event;
+    event.kind = kind;
+    event.phase = phase;
+    event.name = name;
+    event.seconds = seconds;
+    event.audio_seconds = audio_seconds;
+    event.chunk_index = chunk_index;
+    event.chunk_count = chunk_count;
+    event.current = current;
+    event.total = total;
+    event.updated = updated;
+    event.total_positions = total_positions;
+    model.trace(event);
+}
+
+class ScopedStage {
+public:
+    ScopedStage(
+            const Model & model,
+            std::string phase,
+            std::string name,
+            int chunk_index = 0,
+            int chunk_count = 0,
+            double audio_seconds = 0.0)
+        : model_(model),
+          phase_(std::move(phase)),
+          name_(std::move(name)),
+          chunk_index_(chunk_index),
+          chunk_count_(chunk_count),
+          audio_seconds_(audio_seconds),
+          start_(Clock::now()) {
+        emit_trace(model_, TraceEventKind::StageBegin, phase_, name_, 0.0, audio_seconds_, chunk_index_, chunk_count_);
+    }
+
+    ~ScopedStage() {
+        end();
+    }
+
+    void set_audio_seconds(double audio_seconds) {
+        audio_seconds_ = audio_seconds;
+    }
+
+    void end() {
+        if (ended_) return;
+        ended_ = true;
+        const double seconds = std::chrono::duration<double>(Clock::now() - start_).count();
+        emit_trace(model_, TraceEventKind::StageEnd, phase_, name_, seconds, audio_seconds_, chunk_index_, chunk_count_);
+    }
+
+private:
+    const Model & model_;
+    std::string phase_;
+    std::string name_;
+    int chunk_index_ = 0;
+    int chunk_count_ = 0;
+    double audio_seconds_ = 0.0;
+    Clock::time_point start_;
+    bool ended_ = false;
+};
 
 ggml_tensor * named(ggml_tensor * t, const char * name) {
     ggml_set_name(t, name);
@@ -985,13 +1063,32 @@ int estimate_target_tokens(const Model & model, const std::string & text, float 
     return std::max(1, int(est));
 }
 
-Tensor2i generate_codes(Model & model, const InferenceInputs & inputs, const GenerationConfig & config) {
+Tensor2i generate_codes(Model & model, const InferenceInputs & inputs, const GenerationConfig & config, int chunk_index, int chunk_count) {
+    ScopedStage stage(model, "llm", "llm_decode", chunk_index, chunk_count, double(inputs.target_length) / double(model.higgs.frame_rate()));
     Tensor2i tokens = target_tokens(inputs);
     std::mt19937_64 rng(config.seed.value_or(0));
     const auto schedule = build_schedule(model.spec, inputs.target_length, config);
     std::unique_ptr<SplitCandidateGraph> graph;
-    for (int update_count : schedule) {
-        if (update_count <= 0) continue;
+    const int total_positions = model.spec.num_audio_codebook * inputs.target_length;
+    int updated_positions = 0;
+    for (size_t step = 0; step < schedule.size(); ++step) {
+        const int update_count = schedule[step];
+        if (update_count <= 0) {
+            emit_trace(
+                model,
+                TraceEventKind::LlmProgress,
+                "llm",
+                "llm_decode",
+                0.0,
+                double(inputs.target_length) / double(model.higgs.frame_rate()),
+                chunk_index,
+                chunk_count,
+                int(step + 1),
+                int(schedule.size()),
+                updated_positions,
+                total_positions);
+            continue;
+        }
         InferenceInputs cond = with_target_tokens(inputs, tokens);
         InferenceInputs uncond = prepare_unconditional(model, tokens);
         if (!graph) {
@@ -1042,11 +1139,26 @@ Tensor2i generate_codes(Model & model, const InferenceInputs & inputs, const Gen
             const int t = flat % tokens.cols;
             tokens(c, t) = pred[static_cast<size_t>(flat)];
         }
+        updated_positions = std::min(total_positions, updated_positions + update_count);
+        emit_trace(
+            model,
+            TraceEventKind::LlmProgress,
+            "llm",
+            "llm_decode",
+            0.0,
+            double(inputs.target_length) / double(model.higgs.frame_rate()),
+            chunk_index,
+            chunk_count,
+            int(step + 1),
+            int(schedule.size()),
+            updated_positions,
+            total_positions);
     }
     return tokens;
 }
 
-std::vector<float> decode_codes(Model & model, const Tensor2i & codes) {
+std::vector<float> decode_codes(Model & model, const Tensor2i & codes, int chunk_index, int chunk_count) {
+    ScopedStage stage(model, "decode", "higgs_decode", chunk_index, chunk_count, double(codes.cols) / double(model.higgs.frame_rate()));
     auto graph = build_decode_graph(model, codes.cols);
     for (int c = 0; c < codes.rows; ++c) {
         std::vector<int32_t> row(static_cast<size_t>(codes.cols));
@@ -1247,24 +1359,39 @@ Tensor2i encode_codes_from_semantic_features(Model & model, std::vector<float> w
 
 VoiceClonePrompt make_voice_clone_prompt(Model & model, const std::string & path, std::string ref_text, bool preprocess_prompt) {
     int source_rate = model.higgs.sample_rate;
-    std::vector<float> wav = read_wav_mono(path, model.higgs.sample_rate, &source_rate);
+    std::vector<float> wav;
     float rms = 0.0f;
-    for (float v : wav) rms += v * v;
-    rms = wav.empty() ? 0.0f : std::sqrt(rms / float(wav.size()));
-    if (rms > 0.0f && rms < 0.1f) {
-        const float gain = 0.1f / rms;
-        for (float & v : wav) v *= gain;
+    double ref_audio_seconds = 0.0;
+    {
+        ScopedStage stage(model, "reference_encode", "reference_read_preprocess");
+        wav = read_wav_mono(path, model.higgs.sample_rate, &source_rate);
+        for (float v : wav) rms += v * v;
+        rms = wav.empty() ? 0.0f : std::sqrt(rms / float(wav.size()));
+        if (rms > 0.0f && rms < 0.1f) {
+            const float gain = 0.1f / rms;
+            for (float & v : wav) v *= gain;
+        }
+        if (preprocess_prompt) {
+            wav = remove_silence(wav, model.higgs.sample_rate, 200, 100, 200);
+            ref_text = add_punctuation(ref_text);
+        }
+        const int clip = int(wav.size() % static_cast<size_t>(model.higgs.hop_length()));
+        if (clip > 0) wav.resize(wav.size() - static_cast<size_t>(clip));
+        if (wav.empty()) throw std::runtime_error("reference audio is empty after preprocessing");
+        ref_audio_seconds = double(wav.size()) / double(model.higgs.sample_rate);
+        stage.set_audio_seconds(ref_audio_seconds);
     }
-    if (preprocess_prompt) {
-        wav = remove_silence(wav, model.higgs.sample_rate, 200, 100, 200);
-        ref_text = add_punctuation(ref_text);
+    std::vector<float> semantic;
+    {
+        ScopedStage stage(model, "reference_encode", "reference_semantic_features", 0, 0, ref_audio_seconds);
+        semantic = extract_semantic_features(model, wav, model.higgs.sample_rate);
     }
-    const int clip = int(wav.size() % static_cast<size_t>(model.higgs.hop_length()));
-    if (clip > 0) wav.resize(wav.size() - static_cast<size_t>(clip));
-    if (wav.empty()) throw std::runtime_error("reference audio is empty after preprocessing");
-    std::vector<float> semantic = extract_semantic_features(model, wav, model.higgs.sample_rate);
-    Tensor2i codes = encode_codes_from_semantic_features(model, wav, semantic);
-    return VoiceClonePrompt{std::move(codes), std::move(ref_text), rms};
+    Tensor2i codes;
+    {
+        ScopedStage stage(model, "reference_encode", "reference_higgs_encode", 0, 0, ref_audio_seconds);
+        codes = encode_codes_from_semantic_features(model, wav, semantic);
+    }
+    return VoiceClonePrompt{std::move(codes), std::move(ref_text), rms, ref_audio_seconds};
 }
 
 } // namespace
@@ -1296,50 +1423,61 @@ Audio OmniVoiceRuntime::generate(const SynthesisParams & params) {
     if (params.ref_audio_path.empty() && instruct.empty() && !params.auto_voice) instruct = "male, British accent";
     const std::string lang = resolve_language(params.language);
     instruct = resolve_instruct(instruct, contains_cjk(params.text));
-    const int target = estimate_target_tokens(model, params.text, params.speed, params.duration, has_prompt ? &prompt : nullptr);
     std::vector<std::string> chunk_texts;
     std::vector<int> chunk_targets;
-    const int threshold = int(config.audio_chunk_threshold * model.higgs.frame_rate());
-    if (target > threshold && config.audio_chunk_duration > 0.0f) {
-        const float avg = float(target) / float(std::max(1, utf8_length(params.text)));
-        const int chunk_len = std::max(1, int(config.audio_chunk_duration * model.higgs.frame_rate() / std::max(avg, 1.0e-6f)));
-        chunk_texts = chunk_text_punctuation(params.text, chunk_len, 3);
-    }
-    if (chunk_texts.empty()) chunk_texts.push_back(params.text);
-    int remaining = target;
-    int remaining_weight = 0;
-    for (const auto & c : chunk_texts) remaining_weight += std::max(1, utf8_length(c));
-    for (size_t i = 0; i < chunk_texts.size(); ++i) {
-        const int chunk_weight = std::max(1, utf8_length(chunk_texts[i]));
-        int cur;
-        if (i + 1 == chunk_texts.size()) cur = remaining;
-        else {
-            cur = int(std::round(float(remaining) * float(chunk_weight) / float(remaining_weight)));
-            cur = std::max(1, std::min(cur, remaining - int(chunk_texts.size() - i - 1)));
+    {
+        ScopedStage stage(model, "planning", "generation_plan");
+        const int target = estimate_target_tokens(model, params.text, params.speed, params.duration, has_prompt ? &prompt : nullptr);
+        const int threshold = int(config.audio_chunk_threshold * model.higgs.frame_rate());
+        if (target > threshold && config.audio_chunk_duration > 0.0f) {
+            const float avg = float(target) / float(std::max(1, utf8_length(params.text)));
+            const int chunk_len = std::max(1, int(config.audio_chunk_duration * model.higgs.frame_rate() / std::max(avg, 1.0e-6f)));
+            chunk_texts = chunk_text_punctuation(params.text, chunk_len, 3);
         }
-        chunk_targets.push_back(cur);
-        remaining -= cur;
-        remaining_weight -= chunk_weight;
+        if (chunk_texts.empty()) chunk_texts.push_back(params.text);
+        int remaining = target;
+        int remaining_weight = 0;
+        for (const auto & c : chunk_texts) remaining_weight += std::max(1, utf8_length(c));
+        for (size_t i = 0; i < chunk_texts.size(); ++i) {
+            const int chunk_weight = std::max(1, utf8_length(chunk_texts[i]));
+            int cur;
+            if (i + 1 == chunk_texts.size()) cur = remaining;
+            else {
+                cur = int(std::round(float(remaining) * float(chunk_weight) / float(remaining_weight)));
+                cur = std::max(1, std::min(cur, remaining - int(chunk_texts.size() - i - 1)));
+            }
+            chunk_targets.push_back(cur);
+            remaining -= cur;
+            remaining_weight -= chunk_weight;
+        }
     }
 
     std::vector<std::vector<float>> chunk_wavs;
     for (size_t i = 0; i < chunk_texts.size(); ++i) {
         const VoiceClonePrompt * prompt_ptr = has_prompt ? &prompt : nullptr;
-        InferenceInputs in = prepare_inputs(model, chunk_texts[i], chunk_targets[i], lang, instruct, prompt_ptr, config.denoise);
-        Tensor2i codes = generate_codes(model, in, config);
+        InferenceInputs in;
+        {
+            ScopedStage stage(model, "prepare", "prepare_inputs", int(i + 1), int(chunk_texts.size()));
+            in = prepare_inputs(model, chunk_texts[i], chunk_targets[i], lang, instruct, prompt_ptr, config.denoise);
+        }
+        Tensor2i codes = generate_codes(model, in, config, int(i + 1), int(chunk_texts.size()));
         if (!has_prompt && chunk_texts.size() > 1) {
             prompt.ref_audio_tokens = codes;
             prompt.ref_text = chunk_texts[i];
             has_prompt = true;
         }
-        chunk_wavs.push_back(decode_codes(model, codes));
+        chunk_wavs.push_back(decode_codes(model, codes, int(i + 1), int(chunk_texts.size())));
     }
-    std::vector<float> waveform = chunk_wavs.size() == 1 ? chunk_wavs[0] : cross_fade_chunks(chunk_wavs, model.higgs.sample_rate);
-    if (config.postprocess_output) waveform = remove_silence(waveform, model.higgs.sample_rate, 500, 100, 100);
-    float peak = 0.0f;
-    for (float v : waveform) peak = std::max(peak, std::abs(v));
-    if (peak > 1.0e-6f) for (float & v : waveform) v = v / peak * 0.5f;
-    waveform = fade_and_pad_audio(waveform, model.higgs.sample_rate);
+    std::vector<float> waveform;
+    {
+        ScopedStage stage(model, "postprocess", "postprocess");
+        waveform = chunk_wavs.size() == 1 ? chunk_wavs[0] : cross_fade_chunks(chunk_wavs, model.higgs.sample_rate);
+        if (config.postprocess_output) waveform = remove_silence(waveform, model.higgs.sample_rate, 500, 100, 100);
+        float peak = 0.0f;
+        for (float v : waveform) peak = std::max(peak, std::abs(v));
+        if (peak > 1.0e-6f) for (float & v : waveform) v = v / peak * 0.5f;
+        waveform = fade_and_pad_audio(waveform, model.higgs.sample_rate);
+    }
     return Audio{model.higgs.sample_rate, std::move(waveform)};
 }
 

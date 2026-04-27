@@ -90,6 +90,9 @@ The CLI binary is:
 ./build/omnivoice-cli
 ```
 
+The CLI prints stage timing, LLM step progress, and RTF summaries to stderr.
+This is intended to make latency attribution visible during local inference.
+
 ## Text-To-Speech
 
 ```bash
@@ -161,6 +164,24 @@ Reference audio is WAV-only in this version. `--ref-text` is required.
 `--num-step` is not the output length. It controls how many update iterations
 are used for a fixed target audio span. To force a longer or shorter result,
 use `--duration`.
+
+## Latency Output
+
+Each run prints major stages such as model loading, reference audio encoding,
+generation planning, LLM decode, Higgs decode, postprocessing, and WAV writing.
+The LLM decode stage is rendered as a tqdm-style progress line.
+
+At the end of synthesis, the CLI prints:
+
+```text
+[rtf] total=...
+[rtf] llm=...
+[rtf] reference_encode=...
+[rtf] decode=...
+```
+
+`total`, `llm`, and `decode` use generated output audio duration as the RTF
+denominator. `reference_encode` uses the preprocessed reference audio duration.
 
 ## Models
 

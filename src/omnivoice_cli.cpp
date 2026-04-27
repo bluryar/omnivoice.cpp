@@ -2,8 +2,12 @@
 
 #include "ggml.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cstdlib>
+#include <iomanip>
 #include <iostream>
+#include <map>
 #include <stdexcept>
 #include <string>
 
@@ -16,6 +20,87 @@ void quiet_ggml_log(enum ggml_log_level level, const char * text, void *) {
 bool parse_bool(const std::string & v) {
     return v == "1" || v == "true" || v == "yes" || v == "y";
 }
+
+using Clock = std::chrono::steady_clock;
+
+double elapsed_s(Clock::time_point start) {
+    return std::chrono::duration<double>(Clock::now() - start).count();
+}
+
+struct TracePrinter {
+    std::map<std::string, double> phase_seconds;
+    double reference_audio_seconds = 0.0;
+    bool progress_active = false;
+
+    void clear_progress_line() {
+        if (!progress_active) return;
+        std::cerr << "\r" << std::string(120, ' ') << "\r";
+        progress_active = false;
+    }
+
+    static std::string chunk_label(const omnivoice::TraceEvent & event) {
+        if (event.chunk_count <= 1) return "";
+        return " chunk " + std::to_string(event.chunk_index) + "/" + std::to_string(event.chunk_count);
+    }
+
+    void stage_begin(const omnivoice::TraceEvent & event) {
+        clear_progress_line();
+        std::cerr << "[stage] " << event.phase << "/" << event.name << chunk_label(event) << " ...\n";
+    }
+
+    void stage_end(const omnivoice::TraceEvent & event) {
+        clear_progress_line();
+        phase_seconds[event.phase] += event.seconds;
+        if (event.phase == "reference_encode" && event.audio_seconds > 0.0) {
+            reference_audio_seconds = std::max(reference_audio_seconds, event.audio_seconds);
+        }
+        std::cerr << "[stage] " << event.phase << "/" << event.name << chunk_label(event)
+                  << " done " << std::fixed << std::setprecision(3) << event.seconds << "s\n";
+    }
+
+    void llm_progress(const omnivoice::TraceEvent & event) {
+        const int total = std::max(1, event.total);
+        const int current = std::max(0, std::min(event.current, total));
+        const double ratio = double(current) / double(total);
+        constexpr int width = 30;
+        const int fill = std::max(0, std::min(width, int(ratio * width)));
+
+        std::string bar;
+        bar.reserve(width);
+        bar.append(static_cast<size_t>(fill), '=');
+        if (fill < width) {
+            bar.push_back('>');
+            bar.append(static_cast<size_t>(width - fill - 1), ' ');
+        }
+
+        std::cerr << "\r[llm] " << event.name << chunk_label(event)
+                  << " [" << bar << "] "
+                  << current << "/" << total << " steps";
+        if (event.total_positions > 0) {
+            std::cerr << "  " << event.updated << "/" << event.total_positions << " positions";
+        }
+        std::cerr << std::flush;
+        progress_active = true;
+        if (current >= total) {
+            std::cerr << "\n";
+            progress_active = false;
+        }
+    }
+
+    void operator()(const omnivoice::TraceEvent & event) {
+        switch (event.kind) {
+            case omnivoice::TraceEventKind::StageBegin:
+                stage_begin(event);
+                break;
+            case omnivoice::TraceEventKind::StageEnd:
+                stage_end(event);
+                break;
+            case omnivoice::TraceEventKind::LlmProgress:
+                llm_progress(event);
+                break;
+        }
+    }
+};
 
 void usage() {
     std::cerr
@@ -94,9 +179,53 @@ int main(int argc, char ** argv) {
             throw std::runtime_error("--ref-text is required with --ref-audio");
         }
 
+        TracePrinter trace_printer;
+        options.trace = [&](const omnivoice::TraceEvent & event) {
+            trace_printer(event);
+        };
+
+        std::cerr << "[stage] model_load ...\n";
+        const auto load_start = Clock::now();
         omnivoice::OmniVoiceRuntime runtime(model, options);
+        std::cerr << "[stage] model_load done " << std::fixed << std::setprecision(3) << elapsed_s(load_start) << "s\n";
+
+        std::cerr << "[stage] generate ...\n";
+        const auto generate_start = Clock::now();
         omnivoice::Audio audio = runtime.generate(params);
+        const double generate_seconds = elapsed_s(generate_start);
+        std::cerr << "[stage] generate done " << std::fixed << std::setprecision(3) << generate_seconds << "s\n";
+
+        std::cerr << "[stage] write_wav ...\n";
+        const auto write_start = Clock::now();
         omnivoice::write_wav_mono_f32(output, audio.samples, audio.sample_rate);
+        std::cerr << "[stage] write_wav done " << std::fixed << std::setprecision(3) << elapsed_s(write_start) << "s\n";
+
+        const double output_seconds = audio.sample_rate > 0
+            ? double(audio.samples.size()) / double(audio.sample_rate)
+            : 0.0;
+        const auto print_rtf = [](const std::string & name, double seconds, double audio_seconds) {
+            std::cerr << "[rtf] " << name << "=";
+            if (audio_seconds > 0.0) {
+                std::cerr << std::fixed << std::setprecision(3) << (seconds / audio_seconds);
+            } else {
+                std::cerr << "n/a";
+            }
+            std::cerr << "  seconds=" << std::fixed << std::setprecision(3) << seconds;
+        };
+
+        std::cerr << "[rtf] output_audio_s=" << std::fixed << std::setprecision(3) << output_seconds << "\n";
+        print_rtf("total", generate_seconds, output_seconds);
+        std::cerr << "\n";
+        print_rtf("llm", trace_printer.phase_seconds["llm"], output_seconds);
+        std::cerr << "\n";
+        if (trace_printer.reference_audio_seconds > 0.0) {
+            print_rtf("reference_encode", trace_printer.phase_seconds["reference_encode"], trace_printer.reference_audio_seconds);
+            std::cerr << "  ref_audio_s=" << std::fixed << std::setprecision(3) << trace_printer.reference_audio_seconds << "\n";
+        } else {
+            std::cerr << "[rtf] reference_encode=n/a\n";
+        }
+        print_rtf("decode", trace_printer.phase_seconds["decode"], output_seconds);
+        std::cerr << "\n";
         std::cerr << "saved waveform to " << output << "\n";
         return 0;
     } catch (const std::exception & e) {
