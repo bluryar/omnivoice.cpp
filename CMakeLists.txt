@@ -36,7 +36,13 @@ target_link_libraries(omnivoice_ggml_cpp PUBLIC ggml)
 add_executable(omnivoice-cli src/omnivoice_cli.cpp)
 target_link_libraries(omnivoice-cli PRIVATE omnivoice_ggml_cpp)
 
-install(TARGETS omnivoice_ggml_cpp omnivoice-cli
+add_executable(omnivoice-server src/omnivoice_server.cpp)
+target_include_directories(omnivoice-server PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/vendor/httplib")
+target_link_libraries(omnivoice-server PRIVATE omnivoice_ggml_cpp)
+find_package(Threads REQUIRED)
+target_link_libraries(omnivoice-server PRIVATE Threads::Threads)
+
+install(TARGETS omnivoice_ggml_cpp omnivoice-cli omnivoice-server
     RUNTIME DESTINATION bin
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
