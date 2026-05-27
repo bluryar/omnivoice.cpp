@@ -37,7 +37,7 @@ The server listens on `0.0.0.0:8000` by default.
 
 ### `POST /v1/audio/speech`
 
-Generate audio from text. Returns a binary audio file (WAV or PCM).
+Generate audio from text. Returns a binary audio file (WAV, PCM, or MP3).
 
 This is the primary endpoint, compatible with the OpenAI TTS API format.
 
@@ -50,7 +50,7 @@ These follow the [OpenAI Create Speech API](https://developers.openai.com/api/re
 | `input` | string | yes | | Text to synthesize (max 4096 chars) |
 | `voice` | string | no | | Voice specification (see [Voice Resolution](#voice-resolution)) |
 | `instructions` | string | no | | Style/delivery instructions for voice design |
-| `response_format` | string | no | `"wav"` | Output format: `wav` or `pcm` |
+| `response_format` | string | no | `"wav"` | Output format: `wav`, `pcm`, or `mp3` |
 | `speed` | float | no | `1.0` | Speech speed (0.25 – 4.0) |
 | `model` | string | no | | Ignored (always uses the loaded model) |
 
@@ -136,8 +136,9 @@ The response is a binary audio file with the appropriate `Content-Type` header:
 |---|---|---|
 | `wav` | `audio/wav` | 16-bit PCM WAV (default) |
 | `pcm` | `audio/pcm` | Raw 24kHz 16-bit signed little-endian samples (no header) |
+| `mp3` | `audio/mpeg` | MP3 encoded at 64 kbps CBR |
 
-> **Note:** MP3, Opus, AAC, and FLAC are listed in the OpenAI API spec but are not currently supported by the server. WAV and PCM are natively produced by OmniVoice. If you need other formats, use `ffmpeg` to convert the output.
+> **Note:** Opus, AAC, and FLAC are listed in the OpenAI API spec but are not currently supported by the server. WAV, PCM, and MP3 are produced locally without shelling out to `ffmpeg`.
 
 #### Error Responses
 
@@ -432,4 +433,4 @@ response = client.audio.speech.create(
 response.stream_to_file("output.mp3")
 ```
 
-> **Note:** The OpenAI SDK defaults to MP3 output. Since the server only supports WAV and PCM, you may need to specify `response_format="wav"` via raw HTTP requests, or convert the output afterwards.
+> **Note:** The OpenAI SDK defaults to MP3 output, which is supported by this server via the vendored Shine encoder.

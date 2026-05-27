@@ -4,7 +4,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cstdlib>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <map>
@@ -13,12 +15,21 @@
 
 namespace {
 
+namespace fs = std::filesystem;
+
 void quiet_ggml_log(enum ggml_log_level level, const char * text, void *) {
     if (level == GGML_LOG_LEVEL_WARN || level == GGML_LOG_LEVEL_ERROR) std::cerr << text;
 }
 
 bool parse_bool(const std::string & v) {
     return v == "1" || v == "true" || v == "yes" || v == "y";
+}
+
+std::string lower(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return s;
 }
 
 using Clock = std::chrono::steady_clock;
@@ -104,8 +115,9 @@ struct TracePrinter {
 
 void usage() {
     std::cerr
-        << "usage: omnivoice-cli --model MODEL.gguf --text TEXT --output out.wav [options]\n"
+        << "usage: omnivoice-cli --model MODEL.gguf --text TEXT --output out.wav|out.mp3 [options]\n"
         << "options:\n"
+        << "  --response-format wav|mp3  output format, inferred from --output when omitted\n"
         << "  --language LANG --instruct TEXT --auto-voice true|false\n"
         << "  --num-step N --guidance-scale F --speed F --duration F --t-shift F\n"
         << "  --denoise true|false --postprocess-output true|false --preprocess-prompt true|false\n"
@@ -120,6 +132,7 @@ int main(int argc, char ** argv) {
     try {
         std::string model;
         std::string output;
+        std::string response_format;
         omnivoice::SynthesisParams params;
         omnivoice::RuntimeOptions options;
 
@@ -132,6 +145,7 @@ int main(int argc, char ** argv) {
             if (key == "--model") model = need("--model");
             else if (key == "--text") params.text = need("--text");
             else if (key == "--output" || key == "--out") output = need("--output");
+            else if (key == "--response-format" || key == "--response_format" || key == "--format") response_format = lower(need("--response-format"));
             else if (key == "--ref-audio" || key == "--ref_audio") params.ref_audio_path = need("--ref-audio");
             else if (key == "--ref-text" || key == "--ref_text") params.ref_text = need("--ref-text");
             else if (key == "--language") params.language = need("--language");
@@ -195,10 +209,24 @@ int main(int argc, char ** argv) {
         const double generate_seconds = elapsed_s(generate_start);
         std::cerr << "[stage] generate done " << std::fixed << std::setprecision(3) << generate_seconds << "s\n";
 
-        std::cerr << "[stage] write_wav ...\n";
+        const std::string output_ext = lower(fs::path(output).extension().string());
+        if (response_format.empty()) {
+            response_format = output_ext == ".mp3" ? "mp3" : "wav";
+        }
+        if (response_format != "wav" && response_format != "mp3") {
+            throw std::runtime_error("unsupported --response-format: " + response_format);
+        }
+
         const auto write_start = Clock::now();
-        omnivoice::write_wav_mono_f32(output, audio.samples, audio.sample_rate);
-        std::cerr << "[stage] write_wav done " << std::fixed << std::setprecision(3) << elapsed_s(write_start) << "s\n";
+        if (response_format == "mp3") {
+            std::cerr << "[stage] write_mp3 ...\n";
+            omnivoice::write_mp3_mono_f32(output, audio.samples, audio.sample_rate);
+            std::cerr << "[stage] write_mp3 done " << std::fixed << std::setprecision(3) << elapsed_s(write_start) << "s\n";
+        } else {
+            std::cerr << "[stage] write_wav ...\n";
+            omnivoice::write_wav_mono_f32(output, audio.samples, audio.sample_rate);
+            std::cerr << "[stage] write_wav done " << std::fixed << std::setprecision(3) << elapsed_s(write_start) << "s\n";
+        }
 
         const double output_seconds = audio.sample_rate > 0
             ? double(audio.samples.size()) / double(audio.sample_rate)
@@ -226,7 +254,7 @@ int main(int argc, char ** argv) {
         }
         print_rtf("decode", trace_printer.phase_seconds["decode"], output_seconds);
         std::cerr << "\n";
-        std::cerr << "saved waveform to " << output << "\n";
+        std::cerr << "saved " << response_format << " audio to " << output << "\n";
         return 0;
     } catch (const std::exception & e) {
         std::cerr << "error: " << e.what() << "\n";

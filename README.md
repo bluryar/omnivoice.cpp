@@ -147,7 +147,8 @@ is required.
 ```text
 --model                 GGUF model path
 --text                  input text
---output, --out         output WAV path
+--output, --out         output WAV or MP3 path
+--response-format       output format: wav or mp3
 --language              language name or code, for example Chinese, zh, English, en
 --instruct              voice design prompt, for example "female, low pitch"
 --auto-voice            true|false
@@ -234,7 +235,7 @@ OmniVoice tensor names and metadata.
 ## Limitations
 
 - Reference audio input is limited to WAV, MP3, and FLAC.
-- WAV output only for the CLI.
+- WAV and MP3 output for the CLI.
 - `--ref-text` is required with `--ref-audio`; no ASR fallback is included.
 - The HTTP server is single-runtime and serialized; no batching scheduler,
   authentication, request queue, or rate limiting is included.

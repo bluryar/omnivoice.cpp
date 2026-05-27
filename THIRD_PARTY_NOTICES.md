@@ -49,6 +49,15 @@ The vendored header includes its upstream copyright and license notice.
 The vendored header includes the upstream license statements; the source file
 only enables the single-header implementation.
 
+## Shine
+
+- Project: https://github.com/toots/shine
+- Vendored path: `vendor/shine`
+- Baseline: commit `ab5e3526b64af1a2eaa43aa6f441a7312e013519`
+- License: GNU Library General Public License version 2
+
+The upstream license is included in `vendor/shine/COPYING`.
+
 ## JSON for Modern C++
 
 - Project: https://github.com/nlohmann/json

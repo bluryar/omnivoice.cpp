@@ -89,6 +89,7 @@ std::string encode_pcm(const std::vector<float> & samples) {
 // --- Helpers --------------------------------------------------------------
 
 std::string format_content_type(const std::string & format) {
+    if (format == "mp3")  return "audio/mpeg";
     if (format == "pcm")  return "audio/pcm";
     return "audio/wav";
 }
@@ -352,9 +353,9 @@ int main(int argc, char ** argv) {
 
         // --- Response format ---
         std::string response_format = get_opt_string(body, "response_format", "wav");
-        if (response_format != "wav" && response_format != "pcm") {
+        if (response_format != "wav" && response_format != "pcm" && response_format != "mp3") {
             res.status = 400;
-            res.set_content(json_error("unsupported response_format '" + response_format + "'; supported formats are 'wav' and 'pcm'"), "application/json");
+            res.set_content(json_error("unsupported response_format '" + response_format + "'; supported formats are 'wav', 'pcm', and 'mp3'"), "application/json");
             return;
         }
 
@@ -503,7 +504,9 @@ int main(int argc, char ** argv) {
 
         // --- Encode response ---
         std::string audio_bytes;
-        if (response_format == "pcm") {
+        if (response_format == "mp3") {
+            audio_bytes = omnivoice::encode_mp3_mono_f32(audio.samples, audio.sample_rate);
+        } else if (response_format == "pcm") {
             audio_bytes = encode_pcm(audio.samples);
         } else {
             audio_bytes = encode_wav(audio.samples, audio.sample_rate);

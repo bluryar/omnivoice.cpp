@@ -38,8 +38,32 @@ if(UNIX AND NOT APPLE)
     target_link_libraries(omnivoice_miniaudio PUBLIC m)
 endif()
 
+add_library(omnivoice_shine STATIC
+    vendor/shine/src/lib/bitstream.c
+    vendor/shine/src/lib/huffman.c
+    vendor/shine/src/lib/l3bitstream.c
+    vendor/shine/src/lib/l3loop.c
+    vendor/shine/src/lib/l3mdct.c
+    vendor/shine/src/lib/l3subband.c
+    vendor/shine/src/lib/layer3.c
+    vendor/shine/src/lib/reservoir.c
+    vendor/shine/src/lib/tables.c
+)
+
+set_target_properties(omnivoice_shine PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+target_include_directories(omnivoice_shine
+    PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/vendor/shine/src/lib"
+)
+
+if(UNIX AND NOT APPLE)
+    target_link_libraries(omnivoice_shine PUBLIC m)
+endif()
+
 add_library(omnivoice_ggml_cpp
     src/audio_preprocess.cpp
+    src/mp3.cpp
     src/omnivoice.cpp
     src/tokenizer.cpp
     src/wav.cpp
@@ -53,7 +77,7 @@ target_include_directories(omnivoice_ggml_cpp
         "${OMNIVOICE_GGML_DIR}/src"
 )
 
-target_link_libraries(omnivoice_ggml_cpp PUBLIC ggml PRIVATE omnivoice_miniaudio)
+target_link_libraries(omnivoice_ggml_cpp PUBLIC ggml PRIVATE omnivoice_miniaudio omnivoice_shine)
 
 add_library(omnivoice_nlohmann_json INTERFACE)
 add_library(nlohmann_json::nlohmann_json ALIAS omnivoice_nlohmann_json)
